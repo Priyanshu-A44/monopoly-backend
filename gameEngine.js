@@ -23,7 +23,7 @@ export class MonopolyEngine {
       })),
       turnIndex: 0,
       turnPhase: TURN_PHASES.AWAITING_ROLL,
-      properties: {},
+      properties: {}, // { tileId: { ownerId, houses: 0, isMortgaged: false } }
       auction: null,
       currentDice: [1, 1],
       doublesCount: 0,
@@ -44,7 +44,6 @@ export class MonopolyEngine {
     if (this.state.log.length > 30) this.state.log.pop();
   }
 
-  // --- COUNTRY MONOPOLY VALIDATION ---
   getCountryTiles(countryCode) {
     return BOARD_TILES.filter((t) => t.countryCode === countryCode);
   }
@@ -56,6 +55,48 @@ export class MonopolyEngine {
       countryTiles.length > 0 &&
       countryTiles.every((t) => this.state.properties[t.id]?.ownerId === playerId)
     );
+  }
+
+  // --- MORTGAGE SYSTEM ---
+  mortgageProperty(playerId, tileId) {
+    const player = this.getCurrentPlayer();
+    if (player.id !== playerId) throw new Error("Not your turn!");
+
+    const prop = this.state.properties[tileId];
+    if (!prop || prop.ownerId !== playerId) throw new Error("You do not own this property.");
+    if (prop.isMortgaged) throw new Error("Property is already mortgaged.");
+    if ((prop.houses || 0) > 0) throw new Error("Must sell houses/hotels before mortgaging!");
+
+    const tile = BOARD_TILES[tileId];
+    const mortgageValue = Math.round((tile.price || 100) / 2);
+
+    prop.isMortgaged = true;
+    player.money += mortgageValue;
+    this.logMessage(`🏦 ${player.name} mortgaged ${tile.name} for +$${mortgageValue}.`);
+
+    return this.state;
+  }
+
+  unmortgageProperty(playerId, tileId) {
+    const player = this.getCurrentPlayer();
+    if (player.id !== playerId) throw new Error("Not your turn!");
+
+    const prop = this.state.properties[tileId];
+    if (!prop || prop.ownerId !== playerId) throw new Error("You do not own this property.");
+    if (!prop.isMortgaged) throw new Error("Property is not mortgaged.");
+
+    const tile = BOARD_TILES[tileId];
+    const unmortgageCost = Math.round(((tile.price || 100) / 2) * 1.1);
+
+    if (player.money < unmortgageCost) {
+      throw new Error(`Requires $${unmortgageCost} to unmortgage (You have $${player.money}).`);
+    }
+
+    prop.isMortgaged = false;
+    player.money -= unmortgageCost;
+    this.logMessage(`🔓 ${player.name} unmortgaged ${tile.name} for -$${unmortgageCost}.`);
+
+    return this.state;
   }
 
   teleportPlayer(player, targetIndex, allowPassStart = true) {
@@ -162,7 +203,6 @@ export class MonopolyEngine {
     return this.state;
   }
 
-  // --- RULE CHECK: Full Country Required To Build ---
   canBuildHouse(playerId, tileId) {
     const tile = BOARD_TILES[tileId];
     if (!tile || tile.type !== "PROPERTY" || !tile.countryCode) {
@@ -172,6 +212,10 @@ export class MonopolyEngine {
     const prop = this.state.properties[tileId];
     if (!prop || prop.ownerId !== playerId) {
       return { allowed: false, reason: "You do not own this property." };
+    }
+
+    if (prop.isMortgaged) {
+      return { allowed: false, reason: "Cannot build on a mortgaged property." };
     }
 
     if (!this.hasFullCountry(playerId, tile.countryCode)) {
@@ -272,10 +316,15 @@ export class MonopolyEngine {
       if (!prop) {
         this.state.turnPhase = TURN_PHASES.ACTION_REQUIRED;
       } else if (prop.ownerId !== player.id) {
+        if (prop.isMortgaged) {
+          this.logMessage(`${tile.name} is mortgaged! No rent collected.`);
+          this.state.turnPhase = TURN_PHASES.AWAITING_END_TURN;
+          return;
+        }
+
         const houses = prop.houses || 0;
         let rent = tile.rent ? tile.rent[houses] : 25;
 
-        // Double rent for un-upgraded cities if player owns the full country
         if (houses === 0 && tile.countryCode && this.hasFullCountry(prop.ownerId, tile.countryCode)) {
           rent *= 2;
         }
@@ -320,7 +369,7 @@ export class MonopolyEngine {
     }
 
     player.money -= tile.price;
-    this.state.properties[tile.id] = { ownerId: player.id, houses: 0 };
+    this.state.properties[tile.id] = { ownerId: player.id, houses: 0, isMortgaged: false };
     this.logMessage(`${player.name} bought ${tile.name} for $${tile.price}.`);
     this.state.turnPhase = TURN_PHASES.AWAITING_END_TURN;
     return this.state;
@@ -420,7 +469,7 @@ export class MonopolyEngine {
     if (highestBidderId) {
       const winner = this.state.players.find((p) => p.id === highestBidderId);
       winner.money -= currentBid;
-      this.state.properties[tileId] = { ownerId: winner.id, houses: 0 };
+      this.state.properties[tileId] = { ownerId: winner.id, houses: 0, isMortgaged: false };
       this.logMessage(`Auction won! ${winner.name} bought ${tile.name} for $${currentBid}.`);
     } else {
       this.logMessage(`No bids placed. ${tile.name} remains unowned.`);
