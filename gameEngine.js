@@ -1,4 +1,3 @@
-// gameEngine.js
 import { BOARD_TILES } from "./boardData.js";
 
 export const TURN_PHASES = {
@@ -12,6 +11,7 @@ export class MonopolyEngine {
   constructor(roomCode, rawPlayers) {
     this.state = {
       roomCode,
+      board: BOARD_TILES,
       players: rawPlayers.map((p, idx) => ({
         id: p.id,
         name: p.name,
@@ -23,7 +23,7 @@ export class MonopolyEngine {
       })),
       turnIndex: 0,
       turnPhase: TURN_PHASES.AWAITING_ROLL,
-      properties: {}, // { tileId: { ownerId, houses: 0 } }
+      properties: {},
       auction: null,
       currentDice: [1, 1],
       doublesCount: 0,
@@ -44,15 +44,14 @@ export class MonopolyEngine {
     if (this.state.log.length > 30) this.state.log.pop();
   }
 
-  // --- MONOPOLY & BUILDING HELPERS ---
   getGroupTiles(group) {
-    return BOARD_TILES.filter(t => t.group === group);
+    return BOARD_TILES.filter((t) => t.group === group);
   }
 
   hasMonopoly(playerId, group) {
     if (!group) return false;
     const groupTiles = this.getGroupTiles(group);
-    return groupTiles.every(t => this.state.properties[t.id]?.ownerId === playerId);
+    return groupTiles.every((t) => this.state.properties[t.id]?.ownerId === playerId);
   }
 
   canBuildHouse(playerId, tileId) {
@@ -77,14 +76,14 @@ export class MonopolyEngine {
 
     const groupTiles = this.getGroupTiles(tile.group);
     const minHousesInGroup = Math.min(
-      ...groupTiles.map(t => this.state.properties[t.id]?.houses || 0)
+      ...groupTiles.map((t) => this.state.properties[t.id]?.houses || 0)
     );
 
     if (currentHouses > minHousesInGroup) {
       return { allowed: false, reason: "Build evenly across properties in this group." };
     }
 
-    const player = this.state.players.find(p => p.id === playerId);
+    const player = this.state.players.find((p) => p.id === playerId);
     if (player.money < tile.houseCost) {
       return { allowed: false, reason: `Requires $${tile.houseCost} (You have $${player.money}).` };
     }
@@ -112,7 +111,6 @@ export class MonopolyEngine {
     return this.state;
   }
 
-  // --- CORE GAME ACTIONS ---
   rollDice(playerId) {
     const player = this.getCurrentPlayer();
     if (player.id !== playerId) throw new Error("Not your turn!");
@@ -161,13 +159,12 @@ export class MonopolyEngine {
         const houses = prop.houses || 0;
         let rent = tile.rent ? tile.rent[houses] : 25;
 
-        // Double base rent for full monopoly with 0 houses
         if (houses === 0 && this.hasMonopoly(prop.ownerId, tile.group)) {
           rent *= 2;
         }
 
         player.money -= rent;
-        const owner = this.state.players.find(p => p.id === prop.ownerId);
+        const owner = this.state.players.find((p) => p.id === prop.ownerId);
         if (owner) owner.money += rent;
 
         this.logMessage(`${player.name} paid $${rent} rent to ${owner ? owner.name : "Bank"}.`);
@@ -208,7 +205,6 @@ export class MonopolyEngine {
     return this.state;
   }
 
-  // --- AUCTION SYSTEM ---
   declineProperty(playerId) {
     const player = this.getCurrentPlayer();
     if (player.id !== playerId) throw new Error("Not your turn!");
@@ -223,9 +219,7 @@ export class MonopolyEngine {
   }
 
   startAuction(tileId) {
-    const activeBidders = this.state.players
-      .filter(p => !p.bankrupt)
-      .map(p => p.id);
+    const activeBidders = this.state.players.filter((p) => !p.bankrupt).map((p) => p.id);
 
     this.state.auction = {
       tileId,
@@ -240,7 +234,7 @@ export class MonopolyEngine {
   getAuctionCurrentBidder() {
     if (!this.state.auction || this.state.auction.activeBidders.length === 0) return null;
     const bidderId = this.state.auction.activeBidders[this.state.auction.turnIndex];
-    return this.state.players.find(p => p.id === bidderId);
+    return this.state.players.find((p) => p.id === bidderId);
   }
 
   placeBid(playerId, bidAmount) {
@@ -265,7 +259,8 @@ export class MonopolyEngine {
     this.state.auction.highestBidderId = playerId;
     this.logMessage(`${currentBidder.name} bid $${bidAmount}.`);
 
-    this.state.auction.turnIndex = (this.state.auction.turnIndex + 1) % this.state.auction.activeBidders.length;
+    this.state.auction.turnIndex =
+      (this.state.auction.turnIndex + 1) % this.state.auction.activeBidders.length;
     return this.state;
   }
 
@@ -281,7 +276,9 @@ export class MonopolyEngine {
 
     this.logMessage(`${currentBidder.name} passed on bidding.`);
 
-    this.state.auction.activeBidders = this.state.auction.activeBidders.filter(id => id !== playerId);
+    this.state.auction.activeBidders = this.state.auction.activeBidders.filter(
+      (id) => id !== playerId
+    );
     const remaining = this.state.auction.activeBidders.length;
 
     if (remaining === 0 || (remaining === 1 && this.state.auction.highestBidderId !== null)) {
@@ -300,7 +297,7 @@ export class MonopolyEngine {
     const tile = BOARD_TILES[tileId];
 
     if (highestBidderId) {
-      const winner = this.state.players.find(p => p.id === highestBidderId);
+      const winner = this.state.players.find((p) => p.id === highestBidderId);
       winner.money -= currentBid;
       this.state.properties[tileId] = { ownerId: winner.id, houses: 0 };
       this.logMessage(`Auction won! ${winner.name} bought ${tile.name} for $${currentBid}.`);
@@ -315,7 +312,10 @@ export class MonopolyEngine {
   endTurn(playerId) {
     const player = this.getCurrentPlayer();
     if (player.id !== playerId) throw new Error("Not your turn!");
-    if (this.state.turnPhase !== TURN_PHASES.AWAITING_END_TURN && this.state.turnPhase !== TURN_PHASES.ACTION_REQUIRED) {
+    if (
+      this.state.turnPhase !== TURN_PHASES.AWAITING_END_TURN &&
+      this.state.turnPhase !== TURN_PHASES.ACTION_REQUIRED
+    ) {
       throw new Error("Must finish mandatory actions before ending turn.");
     }
 
