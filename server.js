@@ -1,12 +1,20 @@
-// server.js
 import express from "express";
 import http from "http";
 import { Server } from "socket.io";
+import cors from "cors";
 import { MonopolyEngine } from "./gameEngine.js";
 
 const app = express();
+app.use(cors());
+
+// Health check endpoint for Render zero-downtime monitoring
+app.get("/", (req, res) => {
+  res.send("Monopoly Engine Server is Live");
+});
+
 const server = http.createServer(app);
 
+// Socket.io CORS setup to allow Vercel frontend connections
 const io = new Server(server, {
   cors: {
     origin: "*",
@@ -31,19 +39,32 @@ io.on("connection", (socket) => {
     } else {
       const room = games.get(roomCode);
       if (!room.engine) {
-        room.players.push({ id: socket.id, name: playerName });
+        // Prevent duplicate socket IDs in the lobby
+        if (!room.players.some((p) => p.id === socket.id)) {
+          room.players.push({ id: socket.id, name: playerName });
+        }
       }
     }
 
     const room = games.get(roomCode);
     console.log(`[Lobby Join]: ${playerName} joined room ${roomCode}`);
-    io.to(roomCode).emit("ROOM_UPDATE", { players: room.players, started: !!room.engine });
+    
+    // Notify room of updated lobby state
+    io.to(roomCode).emit("ROOM_UPDATE", { 
+      players: room.players, 
+      started: !!room.engine 
+    });
+
+    // If game is already running, send full game state to reconnected socket
+    if (room.engine) {
+      socket.emit("GAME_STATE_UPDATE", room.engine.getState());
+    }
   });
 
   // Start Game Engine
   socket.on("START_GAME", ({ roomCode }) => {
     const room = games.get(roomCode);
-    if (room && room.players.length >= 2) {
+    if (room && room.players.length >= 1) { // Allows testing with 1+ players
       room.engine = new MonopolyEngine(roomCode, room.players);
       console.log(`[Game Started]: Room ${roomCode}`);
       io.to(roomCode).emit("GAME_STATE_UPDATE", room.engine.getState());
