@@ -76,6 +76,18 @@ io.on("connection", (socket) => {
     }
   });
 
+  socket.on("ACTION_PAY_BAIL", ({ roomCode }) => {
+    const room = games.get(roomCode);
+    if (room && room.engine) {
+      try {
+        const newState = room.engine.payBail(socket.id);
+        io.to(roomCode).emit("GAME_STATE_UPDATE", newState);
+      } catch (err) {
+        socket.emit("ERROR", err.message);
+      }
+    }
+  });
+
   socket.on("ACTION_BUY", ({ roomCode }) => {
     const room = games.get(roomCode);
     if (room && room.engine) {
