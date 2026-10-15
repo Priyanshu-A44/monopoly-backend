@@ -23,7 +23,7 @@ export class MonopolyEngine {
       })),
       turnIndex: 0,
       turnPhase: TURN_PHASES.AWAITING_ROLL,
-      properties: {}, // { tileId: { ownerId, houses: 0 } }
+      properties: {},
       auction: null,
       currentDice: [1, 1],
       doublesCount: 0,
@@ -44,14 +44,18 @@ export class MonopolyEngine {
     if (this.state.log.length > 30) this.state.log.pop();
   }
 
-  getGroupTiles(group) {
-    return BOARD_TILES.filter((t) => t.colorGroup === group || t.group === group);
+  // --- COUNTRY MONOPOLY VALIDATION ---
+  getCountryTiles(countryCode) {
+    return BOARD_TILES.filter((t) => t.countryCode === countryCode);
   }
 
-  hasMonopoly(playerId, group) {
-    if (!group) return false;
-    const groupTiles = this.getGroupTiles(group);
-    return groupTiles.length > 0 && groupTiles.every((t) => this.state.properties[t.id]?.ownerId === playerId);
+  hasFullCountry(playerId, countryCode) {
+    if (!countryCode) return false;
+    const countryTiles = this.getCountryTiles(countryCode);
+    return (
+      countryTiles.length > 0 &&
+      countryTiles.every((t) => this.state.properties[t.id]?.ownerId === playerId)
+    );
   }
 
   teleportPlayer(player, targetIndex, allowPassStart = true) {
@@ -158,10 +162,11 @@ export class MonopolyEngine {
     return this.state;
   }
 
+  // --- RULE CHECK: Full Country Required To Build ---
   canBuildHouse(playerId, tileId) {
     const tile = BOARD_TILES[tileId];
-    if (!tile || tile.type !== "PROPERTY" || !tile.colorGroup) {
-      return { allowed: false, reason: "Cannot build on this tile type." };
+    if (!tile || tile.type !== "PROPERTY" || !tile.countryCode) {
+      return { allowed: false, reason: "You can only build houses on country properties." };
     }
 
     const prop = this.state.properties[tileId];
@@ -169,8 +174,11 @@ export class MonopolyEngine {
       return { allowed: false, reason: "You do not own this property." };
     }
 
-    if (!this.hasMonopoly(playerId, tile.colorGroup)) {
-      return { allowed: false, reason: "You must own all properties in this color group first." };
+    if (!this.hasFullCountry(playerId, tile.countryCode)) {
+      return {
+        allowed: false,
+        reason: `You must own ALL cities in country [${tile.countryCode}] before building!`
+      };
     }
 
     const currentHouses = prop.houses || 0;
@@ -267,7 +275,8 @@ export class MonopolyEngine {
         const houses = prop.houses || 0;
         let rent = tile.rent ? tile.rent[houses] : 25;
 
-        if (houses === 0 && this.hasMonopoly(prop.ownerId, tile.colorGroup)) {
+        // Double rent for un-upgraded cities if player owns the full country
+        if (houses === 0 && tile.countryCode && this.hasFullCountry(prop.ownerId, tile.countryCode)) {
           rent *= 2;
         }
 
