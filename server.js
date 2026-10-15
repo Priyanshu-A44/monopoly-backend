@@ -148,6 +148,30 @@ io.on("connection", (socket) => {
     }
   });
 
+  socket.on("ACTION_MORTGAGE", ({ roomCode, tileId }) => {
+    const room = games.get(roomCode);
+    if (room && room.engine) {
+      try {
+        const newState = room.engine.mortgageProperty(socket.id, Number(tileId));
+        io.to(roomCode).emit("GAME_STATE_UPDATE", newState);
+      } catch (err) {
+        socket.emit("ERROR", err.message);
+      }
+    }
+  });
+
+  socket.on("ACTION_UNMORTGAGE", ({ roomCode, tileId }) => {
+    const room = games.get(roomCode);
+    if (room && room.engine) {
+      try {
+        const newState = room.engine.unmortgageProperty(socket.id, Number(tileId));
+        io.to(roomCode).emit("GAME_STATE_UPDATE", newState);
+      } catch (err) {
+        socket.emit("ERROR", err.message);
+      }
+    }
+  });
+
   socket.on("ACTION_END_TURN", ({ roomCode }) => {
     const room = games.get(roomCode);
     if (room && room.engine) {
