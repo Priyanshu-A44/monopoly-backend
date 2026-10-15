@@ -19,7 +19,7 @@ export const BOARD_TILES = [
   { id: 17, name: "Community Chest", type: "CHEST" },
   { id: 18, name: "Munich", price: 180, colorGroup: "#f59e0b", countryCode: "DE", type: "PROPERTY", houseCost: 100, rent: [14, 70, 200, 550, 750, 950] },
   { id: 19, name: "Berlin", price: 200, colorGroup: "#f59e0b", countryCode: "DE", type: "PROPERTY", houseCost: 100, rent: [16, 80, 220, 600, 800, 1000] },
-  { id: 20, name: "Free Parking", type: "CORNER" },
+  { id: 20, name: "Vacation", type: "CORNER" },
   { id: 21, name: "Paris", price: 220, colorGroup: "#10b981", countryCode: "FR", type: "PROPERTY", houseCost: 150, rent: [18, 90, 250, 700, 875, 1050] },
   { id: 22, name: "Chance", type: "CHANCE" },
   { id: 23, name: "Nice", price: 220, colorGroup: "#10b981", countryCode: "FR", type: "PROPERTY", houseCost: 150, rent: [18, 90, 250, 700, 875, 1050] },
