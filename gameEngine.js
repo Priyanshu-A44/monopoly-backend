@@ -23,7 +23,7 @@ export class MonopolyEngine {
       })),
       turnIndex: 0,
       turnPhase: TURN_PHASES.AWAITING_ROLL,
-      properties: {},
+      properties: {}, // { tileId: { ownerId, houses: 0 } }
       auction: null,
       currentDice: [1, 1],
       doublesCount: 0,
@@ -45,18 +45,122 @@ export class MonopolyEngine {
   }
 
   getGroupTiles(group) {
-    return BOARD_TILES.filter((t) => t.group === group);
+    return BOARD_TILES.filter((t) => t.colorGroup === group || t.group === group);
   }
 
   hasMonopoly(playerId, group) {
     if (!group) return false;
     const groupTiles = this.getGroupTiles(group);
-    return groupTiles.every((t) => this.state.properties[t.id]?.ownerId === playerId);
+    return groupTiles.length > 0 && groupTiles.every((t) => this.state.properties[t.id]?.ownerId === playerId);
+  }
+
+  teleportPlayer(player, targetIndex, allowPassStart = true) {
+    const oldPos = player.position;
+    player.position = targetIndex;
+
+    if (allowPassStart && targetIndex < oldPos && targetIndex !== 10) {
+      player.money += 200;
+      this.logMessage(`✨ ${player.name} passed START while traveling and collected $200!`);
+    }
+
+    this.handleTileLanding(player, BOARD_TILES[player.position]);
+  }
+
+  drawChestCard(player) {
+    const cards = [
+      {
+        text: "✈️ Express Flight! Fly directly to CDG Airport (Tile 25).",
+        action: (p) => this.teleportPlayer(p, 25)
+      },
+      {
+        text: "🎉 Birthday Party! Collect $50 from every player.",
+        action: (p) => {
+          let total = 0;
+          this.state.players.forEach((other) => {
+            if (other.id !== p.id && !other.bankrupt) {
+              const amount = Math.min(other.money, 50);
+              other.money -= amount;
+              total += amount;
+            }
+          });
+          p.money += total;
+          this.state.turnPhase = TURN_PHASES.AWAITING_END_TURN;
+        }
+      },
+      {
+        text: "🚀 Jet Set Vacation! Advance directly to Tokyo (Tile 39).",
+        action: (p) => this.teleportPlayer(p, 39)
+      },
+      {
+        text: "🏦 Bank error in your favor! Collect $200.",
+        action: (p) => {
+          p.money += 200;
+          this.state.turnPhase = TURN_PHASES.AWAITING_END_TURN;
+        }
+      },
+      {
+        text: "🚔 Tax Audit! Go directly to Prison.",
+        action: (p) => {
+          p.position = 10;
+          p.inJail = true;
+          this.logMessage(`${p.name} was locked in Prison!`);
+          this.state.turnPhase = TURN_PHASES.AWAITING_END_TURN;
+        }
+      }
+    ];
+
+    const card = cards[Math.floor(Math.random() * cards.length)];
+    this.logMessage(`📦 Community Chest: ${card.text}`);
+    card.action(player);
+  }
+
+  drawChanceCard(player) {
+    const cards = [
+      {
+        text: "✈️ Emergency Transfer! Move to JFK Airport (Tile 35).",
+        action: (p) => this.teleportPlayer(p, 35)
+      },
+      {
+        text: "🍕 Tour of Rome! Advance directly to Rome (Tile 14).",
+        action: (p) => this.teleportPlayer(p, 14)
+      },
+      {
+        text: "🔙 Move Back 3 Spaces.",
+        action: (p) => {
+          const newPos = (p.position - 3 + 40) % 40;
+          this.teleportPlayer(p, newPos, false);
+        }
+      },
+      {
+        text: "🎰 Crypto Dividend! Collect $250.",
+        action: (p) => {
+          p.money += 250;
+          this.state.turnPhase = TURN_PHASES.AWAITING_END_TURN;
+        }
+      }
+    ];
+
+    const card = cards[Math.floor(Math.random() * cards.length)];
+    this.logMessage(`❓ Chance: ${card.text}`);
+    card.action(player);
+  }
+
+  payBail(playerId) {
+    const player = this.getCurrentPlayer();
+    if (player.id !== playerId) throw new Error("Not your turn!");
+    if (!player.inJail) throw new Error("You are not in prison!");
+    if (player.money < 50) throw new Error("Insufficient funds for $50 bail!");
+
+    player.money -= 50;
+    player.inJail = false;
+    this.logMessage(`🔓 ${player.name} paid $50 bail and was released from Prison!`);
+    this.state.turnPhase = TURN_PHASES.AWAITING_ROLL;
+    return this.state;
   }
 
   canBuildHouse(playerId, tileId) {
     const tile = BOARD_TILES[tileId];
-    if (!tile || tile.type !== "PROPERTY" || !tile.group) {
+    if (!tile || tile.type !== "PROPERTY" || !tile.colorGroup) {
       return { allowed: false, reason: "Cannot build on this tile type." };
     }
 
@@ -65,7 +169,7 @@ export class MonopolyEngine {
       return { allowed: false, reason: "You do not own this property." };
     }
 
-    if (!this.hasMonopoly(playerId, tile.group)) {
+    if (!this.hasMonopoly(playerId, tile.colorGroup)) {
       return { allowed: false, reason: "You must own all properties in this color group first." };
     }
 
@@ -74,18 +178,10 @@ export class MonopolyEngine {
       return { allowed: false, reason: "Property already has a Hotel!" };
     }
 
-    const groupTiles = this.getGroupTiles(tile.group);
-    const minHousesInGroup = Math.min(
-      ...groupTiles.map((t) => this.state.properties[t.id]?.houses || 0)
-    );
-
-    if (currentHouses > minHousesInGroup) {
-      return { allowed: false, reason: "Build evenly across properties in this group." };
-    }
-
     const player = this.state.players.find((p) => p.id === playerId);
-    if (player.money < tile.houseCost) {
-      return { allowed: false, reason: `Requires $${tile.houseCost} (You have $${player.money}).` };
+    const cost = tile.houseCost || 100;
+    if (player.money < cost) {
+      return { allowed: false, reason: `Requires $${cost} (You have $${player.money}).` };
     }
 
     return { allowed: true };
@@ -99,14 +195,15 @@ export class MonopolyEngine {
     if (!check.allowed) throw new Error(check.reason);
 
     const tile = BOARD_TILES[tileId];
-    player.money -= tile.houseCost;
+    const cost = tile.houseCost || 100;
+    player.money -= cost;
 
     const currentHouses = this.state.properties[tileId].houses || 0;
     const newHouses = currentHouses + 1;
     this.state.properties[tileId].houses = newHouses;
 
-    const structureName = newHouses === 5 ? "a Hotel" : `House #${newHouses}`;
-    this.logMessage(`${player.name} built ${structureName} on ${tile.name} for $${tile.houseCost}.`);
+    const structureName = newHouses === 5 ? "a Hotel 🏨" : `House #${newHouses} 🏠`;
+    this.logMessage(`🏗️ ${player.name} built ${structureName} on ${tile.name} for $${cost}.`);
 
     return this.state;
   }
@@ -124,6 +221,17 @@ export class MonopolyEngine {
     const isDouble = d1 === d2;
 
     this.logMessage(`${player.name} rolled ${d1} and ${d2}.`);
+
+    if (player.inJail) {
+      if (isDouble) {
+        player.inJail = false;
+        this.logMessage(`🎲 Double! ${player.name} rolled ${d1}:${d2} and broke out of Prison!`);
+      } else {
+        this.logMessage(`🔒 ${player.name} failed to roll doubles and remains in Prison.`);
+        this.state.turnPhase = TURN_PHASES.AWAITING_END_TURN;
+        return this.state;
+      }
+    }
 
     if (isDouble) this.state.doublesCount++;
     else this.state.doublesCount = 0;
@@ -159,7 +267,7 @@ export class MonopolyEngine {
         const houses = prop.houses || 0;
         let rent = tile.rent ? tile.rent[houses] : 25;
 
-        if (houses === 0 && this.hasMonopoly(prop.ownerId, tile.group)) {
+        if (houses === 0 && this.hasMonopoly(prop.ownerId, tile.colorGroup)) {
           rent *= 2;
         }
 
@@ -173,10 +281,14 @@ export class MonopolyEngine {
         this.state.turnPhase = TURN_PHASES.AWAITING_END_TURN;
       }
     } else if (tile.type === "TAX") {
-      player.money -= tile.amount;
-      this.logMessage(`${player.name} paid $${tile.amount} in ${tile.name}.`);
+      player.money -= (tile.amount || 100);
+      this.logMessage(`${player.name} paid $${tile.amount || 100} in ${tile.name}.`);
       this.state.turnPhase = TURN_PHASES.AWAITING_END_TURN;
-    } else if (tile.id === 30) {
+    } else if (tile.type === "CHEST" || tile.name.includes("Chest")) {
+      this.drawChestCard(player);
+    } else if (tile.type === "CHANCE" || tile.name.includes("Chance")) {
+      this.drawChanceCard(player);
+    } else if (tile.id === 30 || tile.name === "Go To Prison") {
       player.position = 10;
       player.inJail = true;
       this.logMessage(`${player.name} was sent to Prison!`);
