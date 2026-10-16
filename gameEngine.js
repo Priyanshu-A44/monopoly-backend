@@ -65,8 +65,9 @@ export class MonopolyEngine {
   }
 
   countOwned(playerId, type) {
+    const searchType = (type || "").toLowerCase();
     return BOARD_TILES.filter(
-      (t) => t.type === type && this.state.properties[t.id]?.ownerId === playerId
+      (t) => (t.type || "").toLowerCase() === searchType && this.state.properties[t.id]?.ownerId === playerId
     ).length;
   }
 
@@ -242,7 +243,8 @@ export class MonopolyEngine {
   // --- BUILDING ---
   canBuildHouse(playerId, tileId) {
     const tile = BOARD_TILES[tileId];
-    if (!tile || tile.type !== "prop" || !tile.countryCode) {
+    const typeLower = (tile?.type || "").toLowerCase();
+    if (!tile || (typeLower !== "prop" && typeLower !== "property") || !tile.countryCode) {
       return { allowed: false, reason: "You can only build on city properties." };
     }
 
@@ -347,16 +349,18 @@ export class MonopolyEngine {
 
   // --- LANDING & RENT ---
   calculateRent(tile, prop) {
-    if (tile.type === "prop") {
+    const typeLower = (tile.type || "").toLowerCase();
+    if (typeLower === "prop" || typeLower === "property") {
       const houses = prop.houses || 0;
       let rent = tile.rent[houses];
       if (houses === 0 && this.hasFullCountry(prop.ownerId, tile.countryCode)) rent *= 2;
       return rent;
     }
-    if (tile.type === "airport") {
-      const n = this.countOwned(prop.ownerId, "airport");
-      return tile.rent[Math.min(n, 4) - 1];
+    if (typeLower === "airport" || typeLower === "railroad") {
+      const n = this.countOwned(prop.ownerId, "airport") || this.countOwned(prop.ownerId, "railroad");
+      return (tile.rent && tile.rent[Math.min(n, 4) - 1]) || 25 * Math.pow(2, Math.max(0, n - 1));
     }
+    // Utility
     const n = this.countOwned(prop.ownerId, "utility");
     const roll = this.state.currentDice[0] + this.state.currentDice[1];
     return roll * (n >= 2 ? 10 : 4);
@@ -365,10 +369,13 @@ export class MonopolyEngine {
   handleTileLanding(player, tile) {
     this.logMessage(`${player.name} landed on ${tile.name}.`);
     const END = TURN_PHASES.AWAITING_END_TURN;
+    const typeLower = (tile.type || "").toLowerCase();
 
-    switch (tile.type) {
+    switch (typeLower) {
       case "prop":
+      case "property":
       case "airport":
+      case "railroad":
       case "utility": {
         const prop = this.state.properties[tile.id];
         if (!prop) {
@@ -395,15 +402,19 @@ export class MonopolyEngine {
         this.setPhase(END);
         return;
       }
-      case "tax":
-        this.logMessage(`${player.name} pays $${tile.amount} in ${tile.name}.`);
-        this.chargePlayer(player, tile.amount);
+      case "tax": {
+        const amount = typeof tile.amount === "number" ? tile.amount : (tile.price || 100);
+        this.logMessage(`${player.name} pays $${amount} in ${tile.name}.`);
+        this.chargePlayer(player, amount);
         this.setPhase(END);
         return;
+      }
       case "treasure":
+      case "chest":
         this.drawChestCard(player);
         return;
       case "surprise":
+      case "chance":
         this.drawChanceCard(player);
         return;
       case "gotojail":
@@ -452,10 +463,12 @@ export class MonopolyEngine {
       currentBidder: activeBidders[0] || null
     };
     this.setPhase(TURN_PHASES.AUCTION);
+    this.syncAuction();
   }
 
   syncAuction() {
     const a = this.state.auction;
+    if (!a) return;
     a.currentBidder = a.activeBidders[a.turnIndex] || null;
   }
 
