@@ -4,29 +4,35 @@ export const TURN_PHASES = {
   AWAITING_ROLL: "AWAITING_ROLL",
   ACTION_REQUIRED: "ACTION_REQUIRED",
   AUCTION: "AUCTION",
-  AWAITING_END_TURN: "AWAITING_END_TURN"
+  AWAITING_END_TURN: "AWAITING_END_TURN",
+  GAME_OVER: "GAME_OVER"
 };
+
+const COLORS = ["#e74c3c", "#3498db", "#2ecc71", "#f1c40f", "#9b59b6", "#e67e22"];
 
 export class MonopolyEngine {
   constructor(roomCode, rawPlayers) {
+    const shuffled = [...rawPlayers].sort(() => Math.random() - 0.5);
     this.state = {
       roomCode,
       board: BOARD_TILES,
-      players: rawPlayers.map((p, idx) => ({
+      players: shuffled.map((p, idx) => ({
         id: p.id,
         name: p.name,
-        color: ["#e74c3c", "#3498db", "#2ecc71", "#f1c40f", "#9b59b6", "#e67e22"][idx % 6],
+        color: COLORS[idx % COLORS.length],
         money: 1500,
         position: 0,
         inJail: false,
+        jailTurns: 0,
         bankrupt: false
       })),
       turnIndex: 0,
       turnPhase: TURN_PHASES.AWAITING_ROLL,
-      properties: {}, // { tileId: { ownerId, houses: 0, isMortgaged: false } }
+      properties: {}, // { tileId: { ownerId, houses, isMortgaged } }
       auction: null,
       currentDice: [1, 1],
       doublesCount: 0,
+      winnerId: null,
       log: ["Game started with randomized player order. Good luck!"]
     };
   }
@@ -44,17 +50,58 @@ export class MonopolyEngine {
     if (this.state.log.length > 30) this.state.log.pop();
   }
 
+  setPhase(phase) {
+    if (this.state.turnPhase !== TURN_PHASES.GAME_OVER) this.state.turnPhase = phase;
+  }
+
   getCountryTiles(countryCode) {
     return BOARD_TILES.filter((t) => t.countryCode === countryCode);
   }
 
   hasFullCountry(playerId, countryCode) {
     if (!countryCode) return false;
-    const countryTiles = this.getCountryTiles(countryCode);
-    return (
-      countryTiles.length > 0 &&
-      countryTiles.every((t) => this.state.properties[t.id]?.ownerId === playerId)
-    );
+    const tiles = this.getCountryTiles(countryCode);
+    return tiles.length > 0 && tiles.every((t) => this.state.properties[t.id]?.ownerId === playerId);
+  }
+
+  countOwned(playerId, type) {
+    return BOARD_TILES.filter(
+      (t) => t.type === type && this.state.properties[t.id]?.ownerId === playerId
+    ).length;
+  }
+
+  // --- MONEY / BANKRUPTCY ---
+  chargePlayer(player, amount, creditor = null) {
+    if (player.money >= amount) {
+      player.money -= amount;
+      if (creditor) creditor.money += amount;
+      return true;
+    }
+    if (creditor) creditor.money += player.money;
+    player.money = 0;
+    this.declareBankruptcy(player, creditor);
+    return false;
+  }
+
+  declareBankruptcy(player, creditor) {
+    player.bankrupt = true;
+    Object.entries(this.state.properties).forEach(([tileId, prop]) => {
+      if (prop.ownerId !== player.id) return;
+      if (creditor) {
+        prop.ownerId = creditor.id;
+        prop.houses = 0;
+      } else {
+        delete this.state.properties[tileId];
+      }
+    });
+    this.logMessage(`💀 ${player.name} went bankrupt${creditor ? ` to ${creditor.name}` : ""}!`);
+
+    const alive = this.state.players.filter((p) => !p.bankrupt);
+    if (alive.length === 1) {
+      this.state.winnerId = alive[0].id;
+      this.state.turnPhase = TURN_PHASES.GAME_OVER;
+      this.logMessage(`🏆 ${alive[0].name} wins the game!`);
+    }
   }
 
   // --- MORTGAGE SYSTEM ---
@@ -68,12 +115,10 @@ export class MonopolyEngine {
     if ((prop.houses || 0) > 0) throw new Error("Must sell houses/hotels before mortgaging!");
 
     const tile = BOARD_TILES[tileId];
-    const mortgageValue = Math.round((tile.price || 100) / 2);
-
+    const value = Math.round((tile.price || 100) / 2);
     prop.isMortgaged = true;
-    player.money += mortgageValue;
-    this.logMessage(`🏦 ${player.name} mortgaged ${tile.name} for +$${mortgageValue}.`);
-
+    player.money += value;
+    this.logMessage(`🏦 ${player.name} mortgaged ${tile.name} for +$${value}.`);
     return this.state;
   }
 
@@ -86,37 +131,48 @@ export class MonopolyEngine {
     if (!prop.isMortgaged) throw new Error("Property is not mortgaged.");
 
     const tile = BOARD_TILES[tileId];
-    const unmortgageCost = Math.round(((tile.price || 100) / 2) * 1.1);
-
-    if (player.money < unmortgageCost) {
-      throw new Error(`Requires $${unmortgageCost} to unmortgage (You have $${player.money}).`);
-    }
+    const cost = Math.round(((tile.price || 100) / 2) * 1.1);
+    if (player.money < cost) throw new Error(`Requires $${cost} to unmortgage (You have $${player.money}).`);
 
     prop.isMortgaged = false;
-    player.money -= unmortgageCost;
-    this.logMessage(`🔓 ${player.name} unmortgaged ${tile.name} for -$${unmortgageCost}.`);
-
+    player.money -= cost;
+    this.logMessage(`🔓 ${player.name} unmortgaged ${tile.name} for -$${cost}.`);
     return this.state;
+  }
+
+  // --- MOVEMENT ---
+  sendToJail(player) {
+    player.position = 10;
+    player.inJail = true;
+    player.jailTurns = 0;
+    this.logMessage(`🚔 ${player.name} was sent to Prison!`);
+    this.setPhase(TURN_PHASES.AWAITING_END_TURN);
   }
 
   teleportPlayer(player, targetIndex, allowPassStart = true) {
     const oldPos = player.position;
     player.position = targetIndex;
-
-    if (allowPassStart && targetIndex < oldPos && targetIndex !== 10) {
+    if (allowPassStart && targetIndex < oldPos) {
       player.money += 200;
       this.logMessage(`✨ ${player.name} passed START while traveling and collected $200!`);
     }
-
     this.handleTileLanding(player, BOARD_TILES[player.position]);
   }
 
+  moveAndLand(player, steps) {
+    const oldPos = player.position;
+    player.position = (oldPos + steps) % 40;
+    if (player.position < oldPos) {
+      player.money += 200;
+      this.logMessage(`${player.name} passed START and collected $200.`);
+    }
+    this.handleTileLanding(player, BOARD_TILES[player.position]);
+  }
+
+  // --- CARDS ---
   drawChestCard(player) {
     const cards = [
-      {
-        text: "✈️ Express Flight! Fly directly to CDG Airport (Tile 25).",
-        action: (p) => this.teleportPlayer(p, 25)
-      },
+      { text: "✈️ Express Flight! Fly directly to CDG Airport.", action: (p) => this.teleportPlayer(p, 25) },
       {
         text: "🎉 Birthday Party! Collect $50 from every player.",
         action: (p) => {
@@ -129,112 +185,91 @@ export class MonopolyEngine {
             }
           });
           p.money += total;
-          this.state.turnPhase = TURN_PHASES.AWAITING_END_TURN;
+          this.setPhase(TURN_PHASES.AWAITING_END_TURN);
         }
       },
-      {
-        text: "🚀 Jet Set Vacation! Advance directly to Tokyo (Tile 39).",
-        action: (p) => this.teleportPlayer(p, 39)
-      },
+      { text: "🚀 Jet Set Vacation! Advance directly to New York.", action: (p) => this.teleportPlayer(p, 39) },
       {
         text: "🏦 Bank error in your favor! Collect $200.",
         action: (p) => {
           p.money += 200;
-          this.state.turnPhase = TURN_PHASES.AWAITING_END_TURN;
+          this.setPhase(TURN_PHASES.AWAITING_END_TURN);
         }
       },
-      {
-        text: "🚔 Tax Audit! Go directly to Prison.",
-        action: (p) => {
-          p.position = 10;
-          p.inJail = true;
-          this.logMessage(`${p.name} was locked in Prison!`);
-          this.state.turnPhase = TURN_PHASES.AWAITING_END_TURN;
-        }
-      }
+      { text: "🚔 Tax Audit! Go directly to Prison.", action: (p) => this.sendToJail(p) }
     ];
-
     const card = cards[Math.floor(Math.random() * cards.length)];
-    this.logMessage(`📦 Community Chest: ${card.text}`);
+    this.logMessage(`📦 Treasure: ${card.text}`);
     card.action(player);
   }
 
   drawChanceCard(player) {
     const cards = [
-      {
-        text: "✈️ Emergency Transfer! Move to JFK Airport (Tile 35).",
-        action: (p) => this.teleportPlayer(p, 35)
-      },
-      {
-        text: "🍕 Tour of Rome! Advance directly to Rome (Tile 14).",
-        action: (p) => this.teleportPlayer(p, 14)
-      },
+      { text: "✈️ Emergency Transfer! Move to JFK Airport.", action: (p) => this.teleportPlayer(p, 35) },
+      { text: "🍕 Tour of Rome! Advance directly to Rome.", action: (p) => this.teleportPlayer(p, 14) },
       {
         text: "🔙 Move Back 3 Spaces.",
-        action: (p) => {
-          const newPos = (p.position - 3 + 40) % 40;
-          this.teleportPlayer(p, newPos, false);
-        }
+        action: (p) => this.teleportPlayer(p, (p.position - 3 + 40) % 40, false)
       },
       {
         text: "🎰 Crypto Dividend! Collect $250.",
         action: (p) => {
           p.money += 250;
-          this.state.turnPhase = TURN_PHASES.AWAITING_END_TURN;
+          this.setPhase(TURN_PHASES.AWAITING_END_TURN);
         }
       }
     ];
-
     const card = cards[Math.floor(Math.random() * cards.length)];
-    this.logMessage(`❓ Chance: ${card.text}`);
+    this.logMessage(`❓ Surprise: ${card.text}`);
     card.action(player);
   }
 
+  // --- JAIL ---
   payBail(playerId) {
     const player = this.getCurrentPlayer();
     if (player.id !== playerId) throw new Error("Not your turn!");
     if (!player.inJail) throw new Error("You are not in prison!");
+    if (this.state.turnPhase !== TURN_PHASES.AWAITING_ROLL) throw new Error("Cannot pay bail right now.");
     if (player.money < 50) throw new Error("Insufficient funds for $50 bail!");
 
     player.money -= 50;
     player.inJail = false;
+    player.jailTurns = 0;
     this.logMessage(`🔓 ${player.name} paid $50 bail and was released from Prison!`);
-    this.state.turnPhase = TURN_PHASES.AWAITING_ROLL;
     return this.state;
   }
 
+  // --- BUILDING ---
   canBuildHouse(playerId, tileId) {
     const tile = BOARD_TILES[tileId];
-    if (!tile || tile.type !== "PROPERTY" || !tile.countryCode) {
-      return { allowed: false, reason: "You can only build houses on country properties." };
+    if (!tile || tile.type !== "prop" || !tile.countryCode) {
+      return { allowed: false, reason: "You can only build on city properties." };
     }
 
     const prop = this.state.properties[tileId];
-    if (!prop || prop.ownerId !== playerId) {
-      return { allowed: false, reason: "You do not own this property." };
-    }
-
-    if (prop.isMortgaged) {
-      return { allowed: false, reason: "Cannot build on a mortgaged property." };
-    }
+    if (!prop || prop.ownerId !== playerId) return { allowed: false, reason: "You do not own this property." };
+    if (prop.isMortgaged) return { allowed: false, reason: "Cannot build on a mortgaged property." };
 
     if (!this.hasFullCountry(playerId, tile.countryCode)) {
-      return {
-        allowed: false,
-        reason: `You must own ALL cities in country [${tile.countryCode}] before building!`
-      };
+      return { allowed: false, reason: `You must own ALL cities in ${tile.countryCode} before building!` };
     }
 
-    const currentHouses = prop.houses || 0;
-    if (currentHouses >= 5) {
-      return { allowed: false, reason: "Property already has a Hotel!" };
+    const group = this.getCountryTiles(tile.countryCode);
+    if (group.some((t) => this.state.properties[t.id]?.isMortgaged)) {
+      return { allowed: false, reason: "Unmortgage all cities in this country first." };
+    }
+
+    const current = prop.houses || 0;
+    if (current >= 5) return { allowed: false, reason: "Property already has a Hotel!" };
+
+    const minHouses = Math.min(...group.map((t) => this.state.properties[t.id]?.houses || 0));
+    if (current > minHouses) {
+      return { allowed: false, reason: "Build evenly: add to your other cities in this country first." };
     }
 
     const player = this.state.players.find((p) => p.id === playerId);
     const cost = tile.houseCost || 100;
-    if (player.money < cost) {
-      return { allowed: false, reason: `Requires $${cost} (You have $${player.money}).` };
-    }
+    if (player.money < cost) return { allowed: false, reason: `Requires $${cost} (You have $${player.money}).` };
 
     return { allowed: true };
   }
@@ -250,137 +285,155 @@ export class MonopolyEngine {
     const cost = tile.houseCost || 100;
     player.money -= cost;
 
-    const currentHouses = this.state.properties[tileId].houses || 0;
-    const newHouses = currentHouses + 1;
-    this.state.properties[tileId].houses = newHouses;
+    const prop = this.state.properties[tileId];
+    prop.houses = (prop.houses || 0) + 1;
 
-    const structureName = newHouses === 5 ? "a Hotel 🏨" : `House #${newHouses} 🏠`;
-    this.logMessage(`🏗️ ${player.name} built ${structureName} on ${tile.name} for $${cost}.`);
-
+    const name = prop.houses === 5 ? "a Hotel 🏨" : `House #${prop.houses} 🏠`;
+    this.logMessage(`🏗️ ${player.name} built ${name} on ${tile.name} for $${cost}.`);
     return this.state;
   }
 
+  // --- DICE ---
   rollDice(playerId) {
     const player = this.getCurrentPlayer();
     if (player.id !== playerId) throw new Error("Not your turn!");
-    if (this.state.turnPhase !== TURN_PHASES.AWAITING_ROLL) {
-      throw new Error("Cannot roll right now.");
-    }
+    if (this.state.turnPhase !== TURN_PHASES.AWAITING_ROLL) throw new Error("Cannot roll right now.");
 
     const d1 = Math.floor(Math.random() * 6) + 1;
     const d2 = Math.floor(Math.random() * 6) + 1;
     this.state.currentDice = [d1, d2];
     const isDouble = d1 === d2;
-
     this.logMessage(`${player.name} rolled ${d1} and ${d2}.`);
 
+    let leftJail = false;
     if (player.inJail) {
       if (isDouble) {
         player.inJail = false;
-        this.logMessage(`🎲 Double! ${player.name} rolled ${d1}:${d2} and broke out of Prison!`);
+        player.jailTurns = 0;
+        leftJail = true;
+        this.logMessage(`🎲 Double! ${player.name} broke out of Prison!`);
       } else {
-        this.logMessage(`🔒 ${player.name} failed to roll doubles and remains in Prison.`);
-        this.state.turnPhase = TURN_PHASES.AWAITING_END_TURN;
-        return this.state;
+        player.jailTurns = (player.jailTurns || 0) + 1;
+        if (player.jailTurns < 3) {
+          this.logMessage(`🔒 ${player.name} failed to roll doubles and remains in Prison.`);
+          this.setPhase(TURN_PHASES.AWAITING_END_TURN);
+          return this.state;
+        }
+        this.logMessage(`⚖️ ${player.name} failed 3 times and must pay $50 bail.`);
+        if (!this.chargePlayer(player, 50)) {
+          this.setPhase(TURN_PHASES.AWAITING_END_TURN);
+          return this.state;
+        }
+        player.inJail = false;
+        player.jailTurns = 0;
+        leftJail = true;
       }
     }
 
-    if (isDouble) this.state.doublesCount++;
+    if (leftJail) this.state.doublesCount = 0;
+    else if (isDouble) this.state.doublesCount++;
     else this.state.doublesCount = 0;
 
     if (this.state.doublesCount === 3) {
-      player.position = 10;
-      player.inJail = true;
-      this.state.turnPhase = TURN_PHASES.AWAITING_END_TURN;
-      this.logMessage(`${player.name} rolled 3 doubles and went to Prison!`);
+      this.state.doublesCount = 0;
+      this.logMessage(`${player.name} rolled 3 doubles in a row!`);
+      this.sendToJail(player);
       return this.state;
     }
 
-    const oldPos = player.position;
-    player.position = (player.position + d1 + d2) % 40;
-
-    if (player.position < oldPos) {
-      player.money += 200;
-      this.logMessage(`${player.name} passed START and collected $200.`);
-    }
-
-    this.handleTileLanding(player, BOARD_TILES[player.position]);
+    this.moveAndLand(player, d1 + d2);
     return this.state;
+  }
+
+  // --- LANDING & RENT ---
+  calculateRent(tile, prop) {
+    if (tile.type === "prop") {
+      const houses = prop.houses || 0;
+      let rent = tile.rent[houses];
+      if (houses === 0 && this.hasFullCountry(prop.ownerId, tile.countryCode)) rent *= 2;
+      return rent;
+    }
+    if (tile.type === "airport") {
+      const n = this.countOwned(prop.ownerId, "airport");
+      return tile.rent[Math.min(n, 4) - 1];
+    }
+    const n = this.countOwned(prop.ownerId, "utility");
+    const roll = this.state.currentDice[0] + this.state.currentDice[1];
+    return roll * (n >= 2 ? 10 : 4);
   }
 
   handleTileLanding(player, tile) {
     this.logMessage(`${player.name} landed on ${tile.name}.`);
+    const END = TURN_PHASES.AWAITING_END_TURN;
 
-    if (tile.type === "PROPERTY" || tile.type === "RAILROAD" || tile.type === "UTILITY") {
-      const prop = this.state.properties[tile.id];
-      if (!prop) {
-        this.state.turnPhase = TURN_PHASES.ACTION_REQUIRED;
-      } else if (prop.ownerId !== player.id) {
-        if (prop.isMortgaged) {
-          this.logMessage(`${tile.name} is mortgaged! No rent collected.`);
-          this.state.turnPhase = TURN_PHASES.AWAITING_END_TURN;
+    switch (tile.type) {
+      case "prop":
+      case "airport":
+      case "utility": {
+        const prop = this.state.properties[tile.id];
+        if (!prop) {
+          this.setPhase(TURN_PHASES.ACTION_REQUIRED);
           return;
         }
-
-        const houses = prop.houses || 0;
-        let rent = tile.rent ? tile.rent[houses] : 25;
-
-        if (houses === 0 && tile.countryCode && this.hasFullCountry(prop.ownerId, tile.countryCode)) {
-          rent *= 2;
+        if (prop.ownerId === player.id) {
+          this.setPhase(END);
+          return;
         }
-
-        player.money -= rent;
+        if (prop.isMortgaged) {
+          this.logMessage(`${tile.name} is mortgaged! No rent collected.`);
+          this.setPhase(END);
+          return;
+        }
         const owner = this.state.players.find((p) => p.id === prop.ownerId);
-        if (owner) owner.money += rent;
-
-        this.logMessage(`${player.name} paid $${rent} rent to ${owner ? owner.name : "Bank"}.`);
-        this.state.turnPhase = TURN_PHASES.AWAITING_END_TURN;
-      } else {
-        this.state.turnPhase = TURN_PHASES.AWAITING_END_TURN;
+        if (!owner) {
+          this.setPhase(END);
+          return;
+        }
+        const rent = this.calculateRent(tile, prop);
+        this.logMessage(`${player.name} owes $${rent} rent to ${owner.name}.`);
+        this.chargePlayer(player, rent, owner);
+        this.setPhase(END);
+        return;
       }
-    } else if (tile.type === "TAX") {
-      player.money -= (tile.amount || 100);
-      this.logMessage(`${player.name} paid $${tile.amount || 100} in ${tile.name}.`);
-      this.state.turnPhase = TURN_PHASES.AWAITING_END_TURN;
-    } else if (tile.type === "CHEST" || tile.name.includes("Chest")) {
-      this.drawChestCard(player);
-    } else if (tile.type === "CHANCE" || tile.name.includes("Chance")) {
-      this.drawChanceCard(player);
-    } else if (tile.id === 30 || tile.name === "Go To Prison") {
-      player.position = 10;
-      player.inJail = true;
-      this.logMessage(`${player.name} was sent to Prison!`);
-      this.state.turnPhase = TURN_PHASES.AWAITING_END_TURN;
-    } else {
-      this.state.turnPhase = TURN_PHASES.AWAITING_END_TURN;
+      case "tax":
+        this.logMessage(`${player.name} pays $${tile.amount} in ${tile.name}.`);
+        this.chargePlayer(player, tile.amount);
+        this.setPhase(END);
+        return;
+      case "treasure":
+        this.drawChestCard(player);
+        return;
+      case "surprise":
+        this.drawChanceCard(player);
+        return;
+      case "gotojail":
+        this.sendToJail(player);
+        return;
+      default:
+        this.setPhase(END);
     }
   }
 
+  // --- BUY / AUCTION ---
   buyProperty(playerId) {
     const player = this.getCurrentPlayer();
     if (player.id !== playerId) throw new Error("Not your turn!");
-    if (this.state.turnPhase !== TURN_PHASES.ACTION_REQUIRED) {
-      throw new Error("Cannot buy property right now.");
-    }
+    if (this.state.turnPhase !== TURN_PHASES.ACTION_REQUIRED) throw new Error("Cannot buy property right now.");
 
     const tile = BOARD_TILES[player.position];
-    if (player.money < tile.price) {
-      throw new Error("Insufficient funds to buy property.");
-    }
+    if (player.money < tile.price) throw new Error("Insufficient funds to buy property.");
 
     player.money -= tile.price;
     this.state.properties[tile.id] = { ownerId: player.id, houses: 0, isMortgaged: false };
     this.logMessage(`${player.name} bought ${tile.name} for $${tile.price}.`);
-    this.state.turnPhase = TURN_PHASES.AWAITING_END_TURN;
+    this.setPhase(TURN_PHASES.AWAITING_END_TURN);
     return this.state;
   }
 
   declineProperty(playerId) {
     const player = this.getCurrentPlayer();
     if (player.id !== playerId) throw new Error("Not your turn!");
-    if (this.state.turnPhase !== TURN_PHASES.ACTION_REQUIRED) {
-      throw new Error("Cannot trigger auction now.");
-    }
+    if (this.state.turnPhase !== TURN_PHASES.ACTION_REQUIRED) throw new Error("Cannot trigger auction now.");
 
     const tile = BOARD_TILES[player.position];
     this.logMessage(`${player.name} declined to buy ${tile.name}. Auction started!`);
@@ -390,75 +443,73 @@ export class MonopolyEngine {
 
   startAuction(tileId) {
     const activeBidders = this.state.players.filter((p) => !p.bankrupt).map((p) => p.id);
-
     this.state.auction = {
       tileId,
       currentBid: 0,
       highestBidderId: null,
       activeBidders,
-      turnIndex: 0
+      turnIndex: 0,
+      currentBidder: activeBidders[0] || null
     };
-    this.state.turnPhase = TURN_PHASES.AUCTION;
+    this.setPhase(TURN_PHASES.AUCTION);
+  }
+
+  syncAuction() {
+    const a = this.state.auction;
+    a.currentBidder = a.activeBidders[a.turnIndex] || null;
   }
 
   getAuctionCurrentBidder() {
-    if (!this.state.auction || this.state.auction.activeBidders.length === 0) return null;
-    const bidderId = this.state.auction.activeBidders[this.state.auction.turnIndex];
-    return this.state.players.find((p) => p.id === bidderId);
+    const a = this.state.auction;
+    if (!a || a.activeBidders.length === 0) return null;
+    return this.state.players.find((p) => p.id === a.activeBidders[a.turnIndex]);
   }
 
   placeBid(playerId, bidAmount) {
-    if (this.state.turnPhase !== TURN_PHASES.AUCTION || !this.state.auction) {
-      throw new Error("No active auction.");
+    if (this.state.turnPhase !== TURN_PHASES.AUCTION || !this.state.auction) throw new Error("No active auction.");
+
+    const bidder = this.getAuctionCurrentBidder();
+    if (!bidder || bidder.id !== playerId) throw new Error("Not your turn to bid!");
+
+    const a = this.state.auction;
+    if (!Number.isInteger(bidAmount) || bidAmount <= a.currentBid) {
+      throw new Error(`Bid must be a whole number greater than $${a.currentBid}.`);
+    }
+    if (bidAmount > bidder.money) throw new Error("You do not have enough money for this bid.");
+
+    a.currentBid = bidAmount;
+    a.highestBidderId = playerId;
+    this.logMessage(`${bidder.name} bid $${bidAmount}.`);
+
+    if (a.activeBidders.length === 1) {
+      this.resolveAuction();
+      return this.state;
     }
 
-    const currentBidder = this.getAuctionCurrentBidder();
-    if (!currentBidder || currentBidder.id !== playerId) {
-      throw new Error("Not your turn to bid!");
-    }
-
-    if (bidAmount <= this.state.auction.currentBid) {
-      throw new Error(`Bid must be greater than current bid ($${this.state.auction.currentBid}).`);
-    }
-
-    if (bidAmount > currentBidder.money) {
-      throw new Error("You do not have enough money for this bid.");
-    }
-
-    this.state.auction.currentBid = bidAmount;
-    this.state.auction.highestBidderId = playerId;
-    this.logMessage(`${currentBidder.name} bid $${bidAmount}.`);
-
-    this.state.auction.turnIndex =
-      (this.state.auction.turnIndex + 1) % this.state.auction.activeBidders.length;
+    a.turnIndex = (a.turnIndex + 1) % a.activeBidders.length;
+    this.syncAuction();
     return this.state;
   }
 
   passBid(playerId) {
-    if (this.state.turnPhase !== TURN_PHASES.AUCTION || !this.state.auction) {
-      throw new Error("No active auction.");
-    }
+    if (this.state.turnPhase !== TURN_PHASES.AUCTION || !this.state.auction) throw new Error("No active auction.");
 
-    const currentBidder = this.getAuctionCurrentBidder();
-    if (!currentBidder || currentBidder.id !== playerId) {
-      throw new Error("Not your turn to bid!");
-    }
+    const bidder = this.getAuctionCurrentBidder();
+    if (!bidder || bidder.id !== playerId) throw new Error("Not your turn to bid!");
 
-    this.logMessage(`${currentBidder.name} passed on bidding.`);
+    const a = this.state.auction;
+    this.logMessage(`${bidder.name} passed on bidding.`);
+    a.activeBidders = a.activeBidders.filter((id) => id !== playerId);
 
-    this.state.auction.activeBidders = this.state.auction.activeBidders.filter(
-      (id) => id !== playerId
-    );
-    const remaining = this.state.auction.activeBidders.length;
+    const remaining = a.activeBidders.length;
+    const onlyHighestLeft = remaining === 1 && a.activeBidders[0] === a.highestBidderId;
 
-    if (remaining === 0 || (remaining === 1 && this.state.auction.highestBidderId !== null)) {
+    if (remaining === 0 || onlyHighestLeft) {
       this.resolveAuction();
     } else {
-      if (this.state.auction.turnIndex >= remaining) {
-        this.state.auction.turnIndex = 0;
-      }
+      if (a.turnIndex >= remaining) a.turnIndex = 0;
+      this.syncAuction();
     }
-
     return this.state;
   }
 
@@ -476,17 +527,22 @@ export class MonopolyEngine {
     }
 
     this.state.auction = null;
-    this.state.turnPhase = TURN_PHASES.AWAITING_END_TURN;
+    this.setPhase(TURN_PHASES.AWAITING_END_TURN);
   }
 
+  // --- TURN ---
   endTurn(playerId) {
     const player = this.getCurrentPlayer();
     if (player.id !== playerId) throw new Error("Not your turn!");
-    if (
-      this.state.turnPhase !== TURN_PHASES.AWAITING_END_TURN &&
-      this.state.turnPhase !== TURN_PHASES.ACTION_REQUIRED
-    ) {
+    if (this.state.turnPhase !== TURN_PHASES.AWAITING_END_TURN) {
       throw new Error("Must finish mandatory actions before ending turn.");
+    }
+
+    // Doubles = roll again
+    if (this.state.doublesCount > 0 && !player.inJail && !player.bankrupt) {
+      this.setPhase(TURN_PHASES.AWAITING_ROLL);
+      this.logMessage(`🎲 ${player.name} rolled doubles and goes again!`);
+      return this.state;
     }
 
     do {
