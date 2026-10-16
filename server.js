@@ -7,12 +7,7 @@ import { MonopolyEngine } from "./gameEngine.js";
 const app = express();
 app.use(cors());
 
-app.get("/", (req, res) => {
-  res.send("Monopoly Engine Server is Live");
-});
-
 const server = http.createServer(app);
-
 const io = new Server(server, {
   cors: {
     origin: "*",
@@ -20,35 +15,34 @@ const io = new Server(server, {
   }
 });
 
-const games = new Map();
+const rooms = new Map(); // roomCode -> { players: [], engine: MonopolyEngine | null }
 
-io.on("connection", (socket) => {
-  console.log(`[Connected]: Socket ID ${socket.id}`);
-
-  socket.on("JOIN_GAME", ({ roomCode, playerName }) => {
-    socket.join(roomCode);
-
-    if (!games.has(roomCode)) {
-      games.set(roomCode, {
-        players: [{ id: socket.id, name: playerName }],
-        engine: null
-      });
-    } else {
-      const room = games.get(roomCode);
-      if (!room.engine) {
-        if (!room.players.some((p) => p.id === socket.id)) {
-          room.players.push({ id: socket.id, name: playerName });
-        }
+// Global 1-second interval for driving timers (e.g., Auction countdown)
+setInterval(() => {
+  rooms.forEach((room, roomCode) => {
+    if (room.engine) {
+      const active = room.engine.tickAuctionTimer();
+      if (active) {
+        io.to(roomCode).emit("GAME_STATE_UPDATE", room.engine.getState());
       }
     }
+  });
+}, 1000);
 
-    const room = games.get(roomCode);
-    console.log(`[Lobby Join]: ${playerName} joined room ${roomCode}`);
+io.on("connection", (socket) => {
+  socket.on("JOIN_GAME", ({ roomCode, playerName }) => {
+    socket.join(roomCode);
+    if (!rooms.has(roomCode)) {
+      rooms.set(roomCode, { players: [], engine: null });
+    }
 
-    io.to(roomCode).emit("ROOM_UPDATE", {
-      players: room.players,
-      started: !!room.engine
-    });
+    const room = rooms.get(roomCode);
+    const existing = room.players.find((p) => p.id === socket.id);
+    if (!existing) {
+      room.players.push({ id: socket.id, name: playerName });
+    }
+
+    io.to(roomCode).emit("ROOM_UPDATE", { players: room.players });
 
     if (room.engine) {
       socket.emit("GAME_STATE_UPDATE", room.engine.getState());
@@ -56,140 +50,75 @@ io.on("connection", (socket) => {
   });
 
   socket.on("START_GAME", ({ roomCode }) => {
-    const room = games.get(roomCode);
-    if (room && room.players.length >= 1) {
-      room.engine = new MonopolyEngine(roomCode, room.players);
-      console.log(`[Game Started]: Room ${roomCode}`);
-      io.to(roomCode).emit("GAME_STATE_UPDATE", room.engine.getState());
-    }
+    const room = rooms.get(roomCode);
+    if (!room) return;
+    room.engine = new MonopolyEngine(roomCode, room.players);
+    io.to(roomCode).emit("GAME_STATE_UPDATE", room.engine.getState());
   });
+
+  const handleAction = (socket, roomCode, actionFn) => {
+    const room = rooms.get(roomCode);
+    if (!room || !room.engine) return;
+    try {
+      actionFn(room.engine);
+      io.to(roomCode).emit("GAME_STATE_UPDATE", room.engine.getState());
+    } catch (err) {
+      socket.emit("ERROR", err.message);
+    }
+  };
 
   socket.on("ACTION_ROLL", ({ roomCode }) => {
-    const room = games.get(roomCode);
-    if (room && room.engine) {
-      try {
-        const newState = room.engine.rollDice(socket.id);
-        io.to(roomCode).emit("GAME_STATE_UPDATE", newState);
-      } catch (err) {
-        socket.emit("ERROR", err.message);
-      }
-    }
-  });
-
-  socket.on("ACTION_PAY_BAIL", ({ roomCode }) => {
-    const room = games.get(roomCode);
-    if (room && room.engine) {
-      try {
-        const newState = room.engine.payBail(socket.id);
-        io.to(roomCode).emit("GAME_STATE_UPDATE", newState);
-      } catch (err) {
-        socket.emit("ERROR", err.message);
-      }
-    }
+    handleAction(socket, roomCode, (engine) => engine.rollDice(socket.id));
   });
 
   socket.on("ACTION_BUY", ({ roomCode }) => {
-    const room = games.get(roomCode);
-    if (room && room.engine) {
-      try {
-        const newState = room.engine.buyProperty(socket.id);
-        io.to(roomCode).emit("GAME_STATE_UPDATE", newState);
-      } catch (err) {
-        socket.emit("ERROR", err.message);
-      }
-    }
+    handleAction(socket, roomCode, (engine) => engine.buyProperty(socket.id));
   });
 
   socket.on("ACTION_DECLINE", ({ roomCode }) => {
-    const room = games.get(roomCode);
-    if (room && room.engine) {
-      try {
-        const newState = room.engine.declineProperty(socket.id);
-        io.to(roomCode).emit("GAME_STATE_UPDATE", newState);
-      } catch (err) {
-        socket.emit("ERROR", err.message);
-      }
-    }
+    handleAction(socket, roomCode, (engine) => engine.declineProperty(socket.id));
   });
 
   socket.on("ACTION_BID", ({ roomCode, amount }) => {
-    const room = games.get(roomCode);
-    if (room && room.engine) {
-      try {
-        const newState = room.engine.placeBid(socket.id, Number(amount));
-        io.to(roomCode).emit("GAME_STATE_UPDATE", newState);
-      } catch (err) {
-        socket.emit("ERROR", err.message);
-      }
-    }
+    handleAction(socket, roomCode, (engine) => engine.placeBid(socket.id, amount));
   });
 
   socket.on("ACTION_PASS_BID", ({ roomCode }) => {
-    const room = games.get(roomCode);
-    if (room && room.engine) {
-      try {
-        const newState = room.engine.passBid(socket.id);
-        io.to(roomCode).emit("GAME_STATE_UPDATE", newState);
-      } catch (err) {
-        socket.emit("ERROR", err.message);
-      }
-    }
-  });
-
-  socket.on("ACTION_BUILD_HOUSE", ({ roomCode, tileId }) => {
-    const room = games.get(roomCode);
-    if (room && room.engine) {
-      try {
-        const newState = room.engine.buildHouse(socket.id, Number(tileId));
-        io.to(roomCode).emit("GAME_STATE_UPDATE", newState);
-      } catch (err) {
-        socket.emit("ERROR", err.message);
-      }
-    }
-  });
-
-  socket.on("ACTION_MORTGAGE", ({ roomCode, tileId }) => {
-    const room = games.get(roomCode);
-    if (room && room.engine) {
-      try {
-        const newState = room.engine.mortgageProperty(socket.id, Number(tileId));
-        io.to(roomCode).emit("GAME_STATE_UPDATE", newState);
-      } catch (err) {
-        socket.emit("ERROR", err.message);
-      }
-    }
-  });
-
-  socket.on("ACTION_UNMORTGAGE", ({ roomCode, tileId }) => {
-    const room = games.get(roomCode);
-    if (room && room.engine) {
-      try {
-        const newState = room.engine.unmortgageProperty(socket.id, Number(tileId));
-        io.to(roomCode).emit("GAME_STATE_UPDATE", newState);
-      } catch (err) {
-        socket.emit("ERROR", err.message);
-      }
-    }
+    handleAction(socket, roomCode, (engine) => engine.passBid(socket.id));
   });
 
   socket.on("ACTION_END_TURN", ({ roomCode }) => {
-    const room = games.get(roomCode);
-    if (room && room.engine) {
-      try {
-        const newState = room.engine.endTurn(socket.id);
-        io.to(roomCode).emit("GAME_STATE_UPDATE", newState);
-      } catch (err) {
-        socket.emit("ERROR", err.message);
-      }
-    }
+    handleAction(socket, roomCode, (engine) => engine.endTurn(socket.id));
+  });
+
+  socket.on("ACTION_PAY_BAIL", ({ roomCode }) => {
+    handleAction(socket, roomCode, (engine) => engine.payBail(socket.id));
+  });
+
+  socket.on("ACTION_BUILD_HOUSE", ({ roomCode, tileId }) => {
+    handleAction(socket, roomCode, (engine) => engine.buildHouse(socket.id, tileId));
+  });
+
+  socket.on("ACTION_MORTGAGE", ({ roomCode, tileId }) => {
+    handleAction(socket, roomCode, (engine) => engine.mortgageProperty(socket.id, tileId));
+  });
+
+  socket.on("ACTION_UNMORTGAGE", ({ roomCode, tileId }) => {
+    handleAction(socket, roomCode, (engine) => engine.unmortgageProperty(socket.id, tileId));
   });
 
   socket.on("disconnect", () => {
-    console.log(`[Disconnected]: Socket ID ${socket.id}`);
+    rooms.forEach((room, roomCode) => {
+      const idx = room.players.findIndex((p) => p.id === socket.id);
+      if (idx !== -1) {
+        room.players.splice(idx, 1);
+        io.to(roomCode).emit("ROOM_UPDATE", { players: room.players });
+      }
+    });
   });
 });
 
 const PORT = process.env.PORT || 4000;
 server.listen(PORT, () => {
-  console.log(`Monopoly Backend running on port ${PORT}`);
+  console.log(`Server running on port ${PORT}`);
 });
