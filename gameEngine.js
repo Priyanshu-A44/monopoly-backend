@@ -28,7 +28,7 @@ export class MonopolyEngine {
       })),
       turnIndex: 0,
       turnPhase: TURN_PHASES.AWAITING_ROLL,
-      properties: {}, // { tileId: { ownerId, houses, isMortgaged } }
+      properties: {},
       auction: null,
       currentDice: [1, 1],
       doublesCount: 0,
@@ -69,6 +69,20 @@ export class MonopolyEngine {
     return BOARD_TILES.filter(
       (t) => (t.type || "").toLowerCase() === searchType && this.state.properties[t.id]?.ownerId === playerId
     ).length;
+  }
+
+  // --- TIMER TICK FOR AUCTION ---
+  tickAuctionTimer() {
+    if (this.state.turnPhase !== TURN_PHASES.AUCTION || !this.state.auction) return false;
+    this.state.auction.timeLeft = (this.state.auction.timeLeft ?? 10) - 1;
+    if (this.state.auction.timeLeft <= 0) {
+      const bidder = this.getAuctionCurrentBidder();
+      if (bidder) {
+        this.logMessage(`⏱️ Time expired for ${bidder.name}! Auto-passing.`);
+        this.passBid(bidder.id);
+      }
+    }
+    return true;
   }
 
   // --- MONEY / BANKRUPTCY ---
@@ -360,7 +374,6 @@ export class MonopolyEngine {
       const n = this.countOwned(prop.ownerId, "airport") || this.countOwned(prop.ownerId, "railroad");
       return (tile.rent && tile.rent[Math.min(n, 4) - 1]) || 25 * Math.pow(2, Math.max(0, n - 1));
     }
-    // Utility
     const n = this.countOwned(prop.ownerId, "utility");
     const roll = this.state.currentDice[0] + this.state.currentDice[1];
     return roll * (n >= 2 ? 10 : 4);
@@ -460,7 +473,8 @@ export class MonopolyEngine {
       highestBidderId: null,
       activeBidders,
       turnIndex: 0,
-      currentBidder: activeBidders[0] || null
+      currentBidder: activeBidders[0] || null,
+      timeLeft: 10
     };
     this.setPhase(TURN_PHASES.AUCTION);
     this.syncAuction();
@@ -470,6 +484,7 @@ export class MonopolyEngine {
     const a = this.state.auction;
     if (!a) return;
     a.currentBidder = a.activeBidders[a.turnIndex] || null;
+    a.timeLeft = 10;
   }
 
   getAuctionCurrentBidder() {
@@ -551,7 +566,6 @@ export class MonopolyEngine {
       throw new Error("Must finish mandatory actions before ending turn.");
     }
 
-    // Doubles = roll again
     if (this.state.doublesCount > 0 && !player.inJail && !player.bankrupt) {
       this.setPhase(TURN_PHASES.AWAITING_ROLL);
       this.logMessage(`🎲 ${player.name} rolled doubles and goes again!`);
